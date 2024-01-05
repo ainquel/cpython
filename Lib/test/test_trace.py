@@ -1,6 +1,8 @@
 import os
+from itertools import product
 from pickle import dump
 import sys
+from multiprocessing.context import _concrete_contexts
 from test.support import captured_stdout
 from test.support.os_helper import (TESTFN, rmtree, unlink)
 from test.support.script_helper import assert_python_ok, assert_python_failure
@@ -553,6 +555,45 @@ class TestCommandLine(unittest.TestCase):
     def test_run_as_module(self):
         assert_python_ok('-m', 'trace', '-l', '--module', 'timeit', '-n', '1')
         assert_python_failure('-m', 'trace', '-l', '--module', 'not_a_module_zzz')
+
+    def test_with_multiprocessing(self):
+        """Ensure trace module work correctly with multiprocessing programs.
+
+        It tests that:
+        - multiprocessing can initialize correctly a subprocess
+        - the subprocess is able to load modules 
+        """
+        code = textwrap.dedent("""\
+            import multiprocessing as mp
+            def a():
+                print("a")
+
+            if __name__ == "__main__":
+                mp.set_start_method("%s")
+                p = mp.Process(target=a)
+                p.start()
+                # timeout if the process hangs for some reason 
+                p.join(10)
+                code = p.exitcode
+                p.close()
+                assert code == 0
+        """)
+        default_args = ['-m', 'trace', '-c']
+        filename = f"{TESTFN}.py"
+        modulename = os.path.basename(TESTFN)
+        testcases = product(
+            _concrete_contexts,
+            ([filename], ["--module", modulename])
+        )
+        for ctx, run_args, in testcases:
+            with self.subTest(run_args=run_args, ctx=ctx):
+                with open(filename, 'w', encoding='utf-8') as fd:
+                    fd.write(code % ctx)
+                args = default_args + run_args
+                _, stdout, _ = assert_python_ok(*args, __cwd=os.getcwd(),
+                                                PYTHONPATH=":".join(sys.path))
+                # ensure the process has been started
+                self.assertTrue(stdout.startswith(b"a\n"), msg=stdout)
 
 
 if __name__ == '__main__':

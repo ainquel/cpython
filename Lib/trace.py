@@ -699,33 +699,54 @@ def main():
               ignoredirs=opts.ignore_dir, infile=opts.file,
               outfile=opts.file, timing=opts.timing)
     try:
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        mod_name = "__main__"
         if opts.module:
-            import runpy
-            module_name = opts.progname
-            mod_name, mod_spec, code = runpy._get_module_details(module_name)
-            sys.argv = [code.co_filename, *opts.arguments]
-            globs = {
-                '__name__': '__main__',
-                '__file__': code.co_filename,
-                '__package__': mod_spec.parent,
-                '__loader__': mod_spec.loader,
-                '__spec__': mod_spec,
-                '__cached__': None,
-            }
+            # import runpy
+            # module_name = opts.progname
+            # _, spec, code = runpy._get_module_details(module_name)
+            # sys.argv = [code.co_filename, *opts.arguments]
+            # globs = {
+            #     '__name__': '__main__',
+            #     '__file__': code.co_filename,
+            #     '__package__': spec.parent,
+            #     '__loader__': spec.loader,
+            #     '__spec__': spec,
+            #     '__cached__': None,
+            # }
+            # module = importlib.util.module_from_spec(spec)
+            spec = importlib.util.find_spec(opts.progname)
+            module = importlib.util.module_from_spec(spec)
         else:
-            sys.argv = [opts.progname, *opts.arguments]
-            sys.path[0] = os.path.dirname(opts.progname)
+            loader = SourceFileLoader(mod_name, opts.progname)
+            spec = importlib.util.spec_from_file_location(mod_name,
+                                                          loader=loader)
+            if spec is None:
+                # not supposed to happen as we give explicitly a loader
+                raise RuntimeError("couldn't import file %s", opts.progname)
+            
+            module = importlib.util.module_from_spec(spec)
+            # ensure multiprocessing does a fixup from path in spawn/forkserver
+            # contexts for files loaded as scripts
+            module.__spec__.name = None
+            # needed for backward-compatibility, importing file using importlib
+            # would use the given file's absolute path
+            module.__loader__.path = opts.progname
+        code = spec.loader.get_code(module.__name__)
+        globs = module.__dict__
+        module.__name__ = mod_name
+        sys.argv = [module.__file__, *opts.arguments]
 
-            with open(opts.progname, 'rb') as fp:
-                code = compile(fp.read(), opts.progname, 'exec')
-            # try to emulate __main__ namespace as much as possible
-            globs = {
-                '__file__': opts.progname,
-                '__name__': '__main__',
-                '__package__': None,
-                '__cached__': None,
-            }
-        t.runctx(code, globs, globs)
+        old_mod = sys.modules.pop(mod_name, None)
+        try:
+            # run code in the main namespace
+            sys.modules[mod_name] = module
+            t.runctx(code, globs, globs)
+        finally:
+            if old_mod:
+                sys.modules[main] = old_mod
+
     except OSError as err:
         sys.exit("Cannot run file %r because: %s" % (sys.argv[0], err))
     except SystemExit:
